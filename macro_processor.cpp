@@ -1,292 +1,368 @@
 #include <iostream>
 #include <sstream>
-#include <fstream>
 #include <string>
 #include <vector>
 #include <unordered_map>
-#include <algorithm>
 #include <cctype>
 using namespace std;
 
-/* ---------- 문자열 유틸 ---------- */
-
-string trimLeft(const string &s) {
-    size_t i = 0;
-    while (i < s.size() && isspace((unsigned char)s[i])) i++;
-    return s.substr(i);
+/* ---------- 문자열 처리 ---------- */
+static inline string trim(const string& s){
+    size_t i = 0, j = s.size();
+    while (i < j && isspace((unsigned char)s[i])) i++;
+    while (j > i && isspace((unsigned char)s[j - 1])) j--;
+    return s.substr(i, j - i);
 }
-
-string trimRight(const string &s) {
-    if (s.empty()) return s;
-    size_t i = s.size();
-    while (i > 0 && isspace((unsigned char)s[i - 1])) i--;
-    return s.substr(0, i);
+static inline string upperStr(string s){
+    for (char& c : s) c = toupper((unsigned char)c);
+    return s;
 }
-
-string trim(const string &s) {
-    return trimRight(trimLeft(s));
-}
-
-string replaceAll(string s, const string &from, const string &to) {
-    if (from.empty()) return s;
-    size_t pos = 0;
-    while ((pos = s.find(from, pos)) != string::npos) {
-        s.replace(pos, from.size(), to);
-        pos += to.size();
+static inline string rep(string s, const string& f, const string& t){
+    if (f.empty()) return s;
+    size_t p = 0;
+    while ((p = s.find(f, p)) != string::npos){
+        s.replace(p, f.size(), t);
+        p += t.size();
     }
     return s;
 }
 
-/* ---------- 데이터 구조: NAMTAB / DEFTAB ---------- */
+/* ---------- 1줄 파싱 ---------- */
+struct PL { bool lab=false; string label, op, opd; };
+static PL parse(const string& l){
+    PL p; string t = trim(l);
+    if (t.empty()) return p;
+    p.lab = !isspace((unsigned char)l[0]);
+    stringstream ss(t);
+    if (p.lab) ss >> p.label >> p.op; else ss >> p.op;
+    string r; getline(ss, r); p.opd = trim(r);
 
-struct NameEntry {
-    int defStart = -1;
-    int defEnd   = -1;
-    vector<string> params;                  // "&INDEV", "&BUFADR", ...
-    unordered_map<string,int> paramIndex;   // "&INDEV" -> 1, "&BUFADR" -> 2
-};
-
-vector<string> DEFTAB;                      // 매크로 본문 라인 (파라미터는 #1,#2,...로 치환)
-unordered_map<string, NameEntry> NAMTAB;    // 매크로 이름 -> 정의 정보
-
-vector<string> INTERMED;                    // Pass1 결과: 매크로 정의 제거, 기타 라인 저장
-
-/* ---------- 보조: 피연산자(인자) 파싱 ---------- */
-
-vector<string> parseArgs(const string &operandField) {
-    vector<string> args;
-    string s = operandField;
-    string token;
-    stringstream ss(s);
-    // 콤마 단위로 잘라서 trim
-    while (getline(ss, token, ',')) {
-        string t = trim(token);
-        if (!t.empty())
-            args.push_back(t);
-    }
-    return args;
-}
-
-/* ---------- 1줄 어셈블리 파싱 (label / opcode / operands) ---------- */
-
-struct ParsedLine {
-    bool hasLabel = false;
-    string label;
-    string opcode;
-    string operands;
-};
-
-ParsedLine parseAssemblyLine(const string &line) {
-    ParsedLine pl;
-    string trimmedLeft = trimLeft(line);
-    if (trimmedLeft.empty()) return pl; // empty line
-
-    bool hasLabel = !(line.empty()) && !isspace((unsigned char)line[0]);
-    pl.hasLabel = hasLabel;
-
-    stringstream ss(trimmedLeft);
-    if (hasLabel) {
-        ss >> pl.label;      // 첫 토큰: label
-        ss >> pl.opcode;     // 둘째 토큰: opcode
-    } else {
-        ss >> pl.opcode;     // 첫 토큰: opcode
-    }
-    string rest;
-    getline(ss, rest);
-    pl.operands = trim(rest);
-    return pl;
-}
-
-/* ---------- Pass2에서 사용할 확장 함수 선언 ---------- */
-
-void expandLine(const string &line, vector<string> &out, int depth);
-
-/* ---------- 매크로 호출 확장 (Pass2) ---------- */
-
-void expandMacro(const string &name,
-                 const vector<string> &actuals,
-                 vector<string> &out,
-                 int depth)
-{
-    auto it = NAMTAB.find(name);
-    if (it == NAMTAB.end()) return;
-    const NameEntry &ne = it->second;
-
-    // 깊이 제한(재귀 폭주 방지)
-    if (depth > 1000) {
-        // 그냥 원본 매크로 호출 형태로 출력해버리자.
-        string line = name;
-        if (!actuals.empty()) {
-            line += " ";
-            for (size_t i = 0; i < actuals.size(); ++i) {
-                if (i > 0) line += ", ";
-                line += actuals[i];
+    if (p.lab){
+        bool noOp = p.op.empty();
+        bool badOp = (!p.op.empty() && !isalpha((unsigned char)p.op[0]) && p.op[0] != '+' && p.op[0] != '-');
+        if (noOp || badOp){
+            string rest = p.op;
+            if (!p.opd.empty()){
+                if (!rest.empty()) rest += " ";
+                rest += p.opd;
             }
+            p.op = p.label;
+            p.label.clear();
+            p.lab = false;
+            p.opd = trim(rest);
         }
-        out.push_back(line);
-        return;
     }
-
-    // ARGTAB: 1-based 인덱스 (#1, #2, ...)
-    vector<string> ARGTAB(ne.params.size() + 1);
-    for (size_t i = 0; i < ne.params.size(); ++i) {
-        string actual = (i < actuals.size()) ? actuals[i] : "";
-        ARGTAB[i + 1] = actual;
-    }
-
-    // DEFTAB[defStart..defEnd] 순회하며 #i 치환
-    for (int idx = ne.defStart; idx <= ne.defEnd; ++idx) {
-        string tmpl = DEFTAB[idx];
-        string expanded = tmpl;
-
-        // #10 이 #1 보다 먼저 치환되도록 뒤에서부터
-        for (int p = (int)ne.params.size(); p >= 1; --p) {
-            string key = "#" + to_string(p);
-            expanded = replaceAll(expanded, key, ARGTAB[p]);
-        }
-
-        // 조건부 매크로, 로컬 라벨 등은 여기서 추가 구현 가능
-        // (현재는 단순 치환 + 재귀 확장만 수행)
-
-        // 치환된 한 줄을 다시 expandLine에 넘겨서
-        // 내부에 다른 매크로 호출이 있는 경우도 처리
-        expandLine(expanded, out, depth + 1);
-    }
+    return p;
 }
 
-/* ---------- 한 줄 확장 (Pass2) ---------- */
+/* ---------- 인자 파싱 ---------- */
+static vector<string> args(const string& s){
+    vector<string> v;
+    string cur;
+    int par = 0;
+    bool qt = false;
+    char qc = 0;
 
-void expandLine(const string &line, vector<string> &out, int depth) {
-    string trimmed = trimLeft(line);
-    if (trimmed.empty()) {
-        out.push_back(line);
-        return;
-    }
+    auto push = [&](){ v.push_back(trim(cur)); cur.clear(); };
 
-    // 주석 라인(.으로 시작) 등은 그대로
-    if (!trimmed.empty() && trimmed[0] == '.') {
-        out.push_back(line);
-        return;
-    }
+    for (size_t i = 0; i < s.size(); i++){
+        char c = s[i];
 
-    ParsedLine pl = parseAssemblyLine(line);
-    if (pl.opcode.empty()) {
-        out.push_back(line);
-        return;
-    }
-
-    auto it = NAMTAB.find(pl.opcode);
-    if (it == NAMTAB.end()) {
-        // 매크로 이름이 아니면 그냥 출력
-        out.push_back(line);
-        return;
-    }
-
-    // 매크로 호출이면 인자 파싱 후 확장
-    vector<string> actuals = parseArgs(pl.operands);
-    expandMacro(pl.opcode, actuals, out, depth);
-}
-
-/* ---------- main: Pass1 + Pass2 ---------- */
-
-int main() {
-    ios::sync_with_stdio(false);
-    cin.tie(nullptr);
-
-    vector<string> allLines;
-    string line;
-    while (getline(cin, line)) {
-        allLines.push_back(line);
-    }
-
-    /* ===== Pass 1: 매크로 정의 수집 ===== */
-
-    bool inMacro = false;
-    string curMacroName;
-    NameEntry curEntry;
-
-    for (size_t i = 0; i < allLines.size(); ++i) {
-        string originalLine = allLines[i];
-        string trimmed = trimLeft(originalLine);
-
-        // 빈 줄
-        if (trimmed.empty()) {
-            if (!inMacro) INTERMED.push_back(originalLine);
-            else {
-                // 매크로 본문 안의 빈 줄도 DEFTAB에 그대로 저장
-                DEFTAB.push_back(originalLine);
-            }
+        if (c=='\'' || c=='"'){
+            if (!qt){ qt = true; qc = c; }
+            else if (qc == c) qt = false;
+            cur.push_back(c);
             continue;
         }
 
-        ParsedLine pl = parseAssemblyLine(originalLine);
+        if (!qt){
+            if (c == '(') { par++; cur.push_back(c); continue; }
+            if (c == ')') { par--; cur.push_back(c); continue; }
+            if (c == ',' && par == 0){ push(); continue; }
+        }
+        cur.push_back(c);
+    }
 
-        if (!inMacro) {
-            // 매크로 정의 시작인지 검사
-            if (!pl.opcode.empty() && pl.opcode == "MACRO") {
-                inMacro = true;
-                curMacroName = pl.label;  // label 필드에 매크로 이름이 들어온다고 가정
-                if (curMacroName.empty()) {
-                    cerr << "Warning: MACRO line without name at line " << (i+1) << "\n";
-                    curMacroName = "_NONAME_"; // 임시
-                }
+    push();
+    return v;
+}
 
-                curEntry = NameEntry();
-                curEntry.defStart = (int)DEFTAB.size();
+/* ---------- Alpha label generator ($AA, $AB, ...) ---------- */
+static string alphaLabel(int n){
+    n = n % (26 * 26);
+    char a = 'A' + (n / 26);
+    char b = 'A' + (n % 26);
+    string s; s.push_back(a); s.push_back(b);
+    return s;
+}
 
-                // 파라미터 목록 파싱 (&INDEV, &BUFADR, ...)
-                vector<string> params = parseArgs(pl.operands);
-                for (size_t pi = 0; pi < params.size(); ++pi) {
-                    string p = params[pi];
-                    if (!p.empty() && p[0] != '&') {
-                        p = "&" + p; // 보정
-                    }
-                    curEntry.params.push_back(p);
-                    curEntry.paramIndex[p] = (int)pi + 1; // 1-based
-                }
+/* ---------- 매크로 테이블 구조 ---------- */
+struct NE {
+    int st = -1, en = -1;
+    vector<string> prm;
+    unordered_map<string,int> idx;
+    unordered_map<string,string> defv;
+};
 
-                // MACRO 라인 자체는 INTERMED에 넣지 않음
-            } else {
-                // 일반 라인 → 임시 출력 버퍼
-                INTERMED.push_back(originalLine);
+vector<string> DEFTAB;
+unordered_map<string, NE> NAMTAB;
+vector<string> INTER;
+
+/* ---------- 출력 포맷 ---------- */
+static string fmt(const string& L, const string& O, const string& P){
+    string s;
+    if (!L.empty()){
+        s += L;
+        if (L.size() < 9) s.append(9 - L.size(), ' ');
+        else s.push_back(' ');
+    }
+    else s.append(9, ' ');
+    s += O; if (!O.empty() && O.size() < 9) s.append(9 - O.size(), ' ');
+    if (!P.empty()) s += P;
+    return s;
+}
+
+/* ---------- 매개변수 접합 처리 (->) ---------- */
+static string concatOp(string s){
+    size_t p = 0;
+    while ((p = s.find("->", p)) != string::npos){
+        if (p > 0 && s[p - 1] == ' '){ s.erase(p - 1, 1); p--; }
+        s.erase(p, 2);
+        if (p < s.size() && s[p] == ' ') s.erase(p, 1);
+    }
+    return s;
+}
+
+/* ---------- 고유 라벨 생성 ($ → $AA) ---------- */
+static string locLabel(string s, const string& u){
+    for (size_t i = 0; i < s.size(); i++){
+        if (s[i] == '$'){
+            size_t j = i + 1;
+            if (j < s.size() && (isalnum((unsigned char)s[j]) || s[j]=='_')){
+                s.insert(j, u);
+                i += u.size();
             }
-        } else {
-            // 매크로 본문 안
-            // MEND 체크
-            if (pl.opcode == "MEND") {
-                inMacro = false;
-                curEntry.defEnd = (int)DEFTAB.size() - 1;
-                NAMTAB[curMacroName] = curEntry;
-                curMacroName.clear();
-                // MEND 라인은 DEFTAB/INTERMED 어디에도 넣지 않음
-            } else {
-                // 본문 라인: 파라미터 이름(&INDEV 등)을 #1,#2,...로 치환해서 DEFTAB에 저장
-                string bodyLine = originalLine;
-                for (size_t pi = 0; pi < curEntry.params.size(); ++pi) {
-                    string pname = curEntry.params[pi];      // "&INDEV"
-                    string key = "#" + to_string(pi + 1);    // "#1"
-                    bodyLine = replaceAll(bodyLine, pname, key);
+        }
+    }
+    return s;
+}
+
+static string replaceArgs(const string& src, const vector<string>& A){
+    string out;
+    for (size_t i = 0; i < src.size(); ){
+        if (src[i]=='#'){
+            size_t j = i+1;
+            int num = 0;
+            bool has = false;
+            while (j < src.size() && isdigit((unsigned char)src[j])){
+                has = true;
+                num = num * 10 + (src[j]-'0');
+                j++;
+            }
+            if (has && j < src.size() && src[j]=='@' &&
+                num > 0 && num < (int)A.size()){
+                out += A[num];
+                i = j + 1;
+                continue;
+            }
+        }
+        out.push_back(src[i++]);
+    }
+    return out;
+}
+
+/* ---------- 조건부 처리 ---------- */
+static string unq(string x){
+    x = trim(x);
+    if (x.size()>=2 &&
+       ((x.front()=='\'' && x.back()=='\'') ||
+        (x.front()=='"' && x.back()=='"')))
+        return x.substr(1, x.size()-2);
+    return x;
+}
+static string strip(string x){
+    x = trim(x);
+    if (!x.empty() && x.front()=='(' && x.back()==')')
+        return strip(x.substr(1, x.size()-2));
+    return x;
+}
+static bool condEval(string cond, const NE& ne, const vector<string>& A){
+    cond = replaceArgs(cond, A);
+    for (size_t i = 0; i < ne.prm.size(); i++)
+        cond = rep(cond, ne.prm[i], A[i+1]);
+    cond = strip(cond);
+
+    size_t p;
+    string L,R,O;
+
+    if ((p = cond.find(" EQ ")) != string::npos){
+        O="EQ"; L=cond.substr(0,p); R=cond.substr(p+4);
+    }
+    else if ((p = cond.find(" NE ")) != string::npos){
+        O="NE"; L=cond.substr(0,p); R=cond.substr(p+4);
+    }
+    else if (cond.rfind("EQ ", 0) == 0){
+        O="EQ"; L=""; R=cond.substr(3);
+    }
+    else if (cond.rfind("NE ", 0) == 0){
+        O="NE"; L=""; R=cond.substr(3);
+    }
+    else return false;
+
+    L = trim(L); R = trim(R);
+    string Lv = unq(L), Rv = unq(R);
+
+    auto blank = [&](string v){
+        return (v=="" || v=="' '" || v=="\" \"" || v=="''");
+    };
+
+    if (blank(L)) Lv = "";
+    if (blank(R)) Rv = "";
+
+    bool eq = (Lv == Rv);
+    return (O == "EQ") ? eq : !eq;
+}
+
+/* ---------- Pass2 ---------- */
+static int SYS = 0;
+
+static void expand(const string& line, vector<string>& out, int d);
+
+static void expandM(const string& name, const vector<string>& ac,
+                    vector<string>& out, int d)
+{
+    auto it = NAMTAB.find(name);
+    if (it == NAMTAB.end()) return;
+    const NE& ne = it->second;
+    if (d > 1000) return;
+
+    string UL = alphaLabel(SYS++);
+
+    unordered_map<string,string> K;
+    vector<string> P;
+
+    for (auto a : ac){
+        a = trim(a);
+        size_t e = a.find('=');
+        if (e != string::npos){
+            string k = trim(a.substr(0,e));
+            string v = trim(a.substr(e+1));
+            if (!k.empty() && k[0] != '&') k = "&"+k;
+            k = upperStr(k);
+            K[k] = v;
+        } else P.push_back(a);
+    }
+
+    vector<string> A(ne.prm.size()+1);
+    for (size_t i = 0; i < ne.prm.size(); i++){
+        string pn = ne.prm[i], v;
+        string key = upperStr(pn);
+        if (K.count(key)) v = K[key];
+        else if (i < P.size()) v = P[i];
+        else if (ne.defv.count(pn)) v = ne.defv.at(pn);
+        A[i+1] = v;
+    }
+
+    vector<bool> STK;
+
+    auto active = [&](){
+        for (bool b : STK) if (!b) return false;
+        return true;
+    };
+
+    for (int i = ne.st; i <= ne.en; i++){
+        string raw = DEFTAB[i];
+        PL p = parse(raw);
+
+        if (p.op == "IF"){
+            STK.push_back(condEval(p.opd, ne, A));
+            continue;
+        }
+        if (p.op == "ELSE"){
+            if (!STK.empty()) STK.back() = !STK.back();
+            continue;
+        }
+        if (p.op == "ENDIF"){
+            if (!STK.empty()) STK.pop_back();
+            continue;
+        }
+        if (!active()) continue;
+
+        string s = raw;
+        s = locLabel(s, UL);
+        s = concatOp(s);
+
+        s = replaceArgs(s, A);
+
+        for (size_t k = 0; k < ne.prm.size(); k++)
+            s = rep(s, ne.prm[k], A[k+1]);
+
+        expand(s, out, d+1);
+    }
+}
+
+static void expand(const string& line, vector<string>& out, int d){
+    PL p = parse(line);
+    if (p.op.empty()){ out.push_back(line); return; }
+    if (NAMTAB.count(p.op)){
+        expandM(p.op, args(p.opd), out, d);
+    } else {
+        out.push_back(fmt(p.lab?p.label:"", p.op, p.opd));
+    }
+}
+
+/* ---------- main (Pass1 + Pass2) ---------- */
+int main(){
+    ios::sync_with_stdio(false);
+    cin.tie(nullptr);
+
+    vector<string> L;
+    string line;
+    while (getline(cin, line)) L.push_back(line);
+
+    bool inM = false;
+    string name;
+    NE cur;
+
+    for (auto& l : L){
+        PL p = parse(l);
+
+        if (!inM){
+            if (p.op == "MACRO"){
+                inM = true; name = p.label;
+                cur = NE(); cur.st = DEFTAB.size();
+                vector<string> ps = args(p.opd);
+
+                for (size_t i=0;i<ps.size();i++){
+                    string v = ps[i], d="";
+                    size_t e = v.find('=');
+                    if (e!=string::npos){ d = trim(v.substr(e+1)); v = trim(v.substr(0,e)); }
+                    if (!v.empty() && v[0] != '&') v = "&"+v;
+                    cur.prm.push_back(v);
+                    cur.idx[v] = i+1;
+                    if (!d.empty()) cur.defv[v] = d;
                 }
-                DEFTAB.push_back(bodyLine);
+            }
+            else INTER.push_back(l);
+        }
+        else {
+            if (p.op == "MEND"){
+                inM = false;
+                cur.en = DEFTAB.size()-1;
+                NAMTAB[name] = cur;
+            }
+            else {
+                string b = l;
+                for (size_t i=0;i<cur.prm.size();i++)
+                    b = rep(b, cur.prm[i], "#"+to_string(i+1)+"@");
+                DEFTAB.push_back(b);
             }
         }
     }
 
-    if (inMacro) {
-        cerr << "Warning: MACRO without closing MEND at end of file.\n";
-    }
-
-    /* ===== Pass 2: 매크로 확장 수행 ===== */
-
-    vector<string> finalOut;
-    for (const string &l : INTERMED) {
-        expandLine(l, finalOut, /*depth=*/0);
-    }
-
-    // 결과 출력
-    for (const string &l : finalOut) {
-        cout << l << "\n";
-    }
+    vector<string> out;
+    for (auto& l : INTER) expand(l, out, 0);
+    for (auto& x : out) cout << x << "\n";
 
     return 0;
 }

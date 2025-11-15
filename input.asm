@@ -1,19 +1,34 @@
 TEST     START   0x1000
-F1       BYTE    X'00'
-F2       BYTE    X'05'
 
+RDBUFF   MACRO   &INDEV=F1, &BUFADR=, &RECLTH=, &EOR=04, &MAXLTH=
          CLEAR   X
-TF1      TD      =X'F1'
-         JEQ     TF1
-         RD      =X'F1'
-         STCH    BUFFER,X
+         CLEAR   A
+IF (&MAXLTH EQ ' ')
+         +LDT    #4096
+ELSE
+         +LDT    #&MAXLTH
+ENDIF
+$LOOP    TD      =X'&INDEV'
+         JEQ     $LOOP
+         RD      =X'&INDEV'
+         STCH    &BUFADR,X
+$EXIT    STX     &RECLTH
+         MEND
 
-         CLEAR   X
-TF2      TD      =X'F2'
-         JEQ     TF2
-         RD      =X'F2'
-         STCH    AREA,X
+SUM      MACRO   &ID
+         LDA     X&ID->1
+         ADD     X&ID->2
+         ADD     X&ID->3
+         STA     X&ID->S
+         MEND
+
+         RDBUFF  F2, BUFFER, LENGTH, (00,03,04), 1024
+         RDBUFF  reclth=LENGTH, bufadr=AREA
+         SUM     A
+         SUM     BETA
 
          END     TEST
+
 BUFFER   RESB    1
 AREA     RESB    1
+LENGTH   WORD    1
